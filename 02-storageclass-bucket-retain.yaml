@@ -1,0 +1,10 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+   name: rook-ceph-retain-bucket
+provisioner: rook-ceph.ceph.rook.io/bucket # driver:namespace:cluster
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+parameters:
+   objectStoreName: my-store # port 80 assumed
+   objectStoreNamespace: rook-ceph # namespace:cluster

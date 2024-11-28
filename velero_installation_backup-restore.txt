@@ -1,0 +1,548 @@
+## 1- create CephObjectStore on rook-ceph
+cd VolumeSnapshot_CRDs
+# 01-object.yaml, 02-storageclass-bucket-retain.yaml and 03-object-bucket-claim-retain.yaml are rook-ceph yaml files in path: rook-1.15.3/deploy/examples/object.yaml
+kubectl apply -f  01-object.yaml
+cephobjectstore.ceph.rook.io/rook-ceph-store created
+
+# check it
+kubectl get cephobjectstore -n rook-ceph
+NAME       PHASE   ENDPOINT                                           SECUREENDPOINT   AGE
+my-store   Ready   http://rook-ceph-rgw-my-store.rook-ceph.svc:8088                    3m38s
+
+## 2- create storageclass on rook-ceph
+kubectl apply -f 02-storageclass-bucket-retain.yaml
+storageclass.storage.k8s.io/rook-ceph-retain-bucket configured
+
+# check it.
+kubectl get sc rook-ceph-retain-bucket
+NAME                      PROVISIONER                     RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION   AGE
+rook-ceph-retain-bucket   rook-ceph.ceph.rook.io/bucket   Retain          Immediate           true                   54s
+
+## 3- create ObjectBucketClaim on rook-ceph 
+kubectl apply -f 03-object-bucket-claim-retain.yaml
+objectbucketclaim.objectbucket.io/ceph-retain-bucket created
+
+# check it.
+kubectl get objectbucketclaims.objectbucket.io -A
+NAMESPACE   NAME                 AGE
+default     ceph-retain-bucket   3m2s
+
+## 4- check secret of objectbucketlaim secret
+kubectl describe secrets ceph-retain-bucket
+Name:         ceph-retain-bucket
+Namespace:    default
+Labels:       bucket-provisioner=rook-ceph.ceph.rook.io-bucket
+Annotations:  <none>
+
+Type:  Opaque
+
+Data
+====
+AWS_ACCESS_KEY_ID:      20 bytes
+AWS_SECRET_ACCESS_KEY:  40 bytes
+
+## 6- check service of rgw modules 
+kubectl get svc -n rook-ceph | grep rgw
+rook-ceph-rgw-my-store    ClusterIP   10.43.197.196   <none>        8088/TCP   30m
+
+## 7- Client Connections
+OBC="ceph-retain-bucket"
+export AWS_HOST=$(kubectl -n default get cm "$OBC" -o jsonpath='{.data.BUCKET_HOST}')
+export PORT=$(kubectl -n default get cm "$OBC" -o jsonpath='{.data.BUCKET_PORT}')
+export AWS_SERVICE_IP=$(kubectl get svc -n rook-ceph rook-ceph-rgw-my-store -o jsonpath='{.spec.clusterIP}')
+export BUCKET_NAME=$(kubectl -n default get cm "$OBC" -o jsonpath='{.data.BUCKET_NAME}')
+export AWS_ACCESS_KEY_ID=$(kubectl -n default get secret "$OBC" -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 --decode)
+export AWS_SECRET_ACCESS_KEY=$(kubectl -n default get secret "$OBC" -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 --decode)
+
+# check it
+echo -e "AWS_HOST:$AWS_HOST \nPort:$PORT \nAWS_SERVICE_IP:$AWS_SERVICE_IP \nBUCKET_NAME:$BUCKET_NAME \nAWS_ACCESS_KEY_ID:$AWS_ACCESS_KEY_ID \nAWS_SECRET_ACCESS_KEY:$AWS_SECRET_ACCESS_KEY"
+AWS_HOST:rook-ceph-rgw-my-store.rook-ceph.svc
+Port:8088
+AWS_SERVICE_IP:10.43.197.196
+BUCKET_NAME:ceph-retain-bucket-velero-bkp
+AWS_ACCESS_KEY_ID:3N0N00ICD79YERV83GIR
+AWS_SECRET_ACCESS_KEY:vQESNzmNJGSuV6yxIKVDrWNjDss4oP9SZjbiWbKk
+
+## 8- create credential file for connection to s3 bucket
+cat > /root/velero/credentials << EOF
+[default]
+aws_access_key_id = ${AWS_ACCESS_KEY_ID}
+aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}
+EOF
+
+# check it
+cat /root/velero/credentials
+[default]
+aws_access_key_id = 3N0N00ICD79YERV83GIR
+aws_secret_access_key = vQESNzmNJGSuV6yxIKVDrWNjDss4oP9SZjbiWbKk
+
+## 9- download velero client binary
+wget https://github.com/vmware-tanzu/velero/releases/download/v1.15.0/velero-v1.15.0-linux-amd64.tar.gz
+tar xvfz velero-v1.15.0-linux-amd64.tar.gz
+cp velero-v1.15.0-linux-amd64/velero /usr/local/bin/
+chmod u+x /usr/local/bin/velero
+
+# check version
+velero version
+Client:
+        Version: v1.15.0
+        Git commit: 1d4f1475975b5107ec35f4d19ff17f7d1fcb3edf
+
+# velero bash completion
+echo 'source <(velero completion bash)' >>~/.bashrc
+source ~/.bashrc
+
+## 10- needed velero docker image 
+docker pull iranetrepo-1.iranet.net:5000/velero/velero-plugin-for-aws:v1.11.0
+docker pull iranetrepo-1.iranet.net:5000/velero/velero:v1.15.0
+
+## 11- install velero server on kubernetes
+velero install \
+--namespace velero \
+--provider aws \
+--use-node-agent \
+--uploader-type kopia \
+--bucket $BUCKET_NAME \
+--plugins velero/velero-plugin-for-aws:v1.11.0 \
+--secret-file /root/velero/credentials \
+--backup-location-config region=west,s3ForcePathStyle="true",s3Url=http://10.43.197.196:8088,insecureSkipTLSVerify=true \
+--use-volume-snapshots=true \
+--features=EnableCSI  \
+--snapshot-location-config region=west 
+.
+.
+.
+DaemonSet/node-agent: attempting to create resource
+DaemonSet/node-agent: attempting to create resource client
+DaemonSet/node-agent: created
+Velero is installed! ⛵ Use 'kubectl logs deployment/velero -n velero' to view the status.
+
+# check it
+# check deployment
+kubectl get deployments.apps -n velero
+NAME     READY   UP-TO-DATE   AVAILABLE   AGE
+velero   1/1     1            1           45s
+
+# check server version
+velero version
+Client:
+        Version: v1.15.0
+        Git commit: 1d4f1475975b5107ec35f4d19ff17f7d1fcb3edf
+Server:
+        Version: v1.15.0
+
+## 12- check backup location
+kubectl get backupstoragelocation default -n velero
+NAME      PHASE       LAST VALIDATED   AGE     DEFAULT
+default   Available   39s              3m42s   true
+
+velero backup-location get
+NAME      PROVIDER   BUCKET/PREFIX                   PHASE       LAST VALIDATED                  ACCESS MODE   DEFAULT
+default   aws        ceph-retain-bucket-velero-bkp   Available   2024-11-28 06:09:47 +0000 UTC   ReadWrite     true
+
+# details
+kubectl get backupstoragelocation -n velero -o yaml
+apiVersion: v1
+items:
+- apiVersion: velero.io/v1
+  kind: BackupStorageLocation
+  metadata:
+    creationTimestamp: "2024-11-28T06:09:44Z"
+    generation: 3
+    labels:
+      component: velero
+    name: default
+    namespace: velero
+    resourceVersion: "123497587"
+    uid: 7376ec21-5173-4b12-85d5-e950c8f85cff
+  spec:
+    config:
+      insecureSkipTLSVerify: "true"
+      region: west
+      s3ForcePathStyle: "true"
+      s3Url: http://10.43.197.196:8088
+    default: true
+    objectStorage:
+      bucket: ceph-retain-bucket-velero-bkp
+    provider: aws
+  status:
+    lastSyncedTime: "2024-11-28T06:09:47Z"
+    lastValidationTime: "2024-11-28T06:09:47Z"
+    phase: Available
+kind: List
+metadata:
+  resourceVersion: ""
+
+## 13- take backup from kube-system namespace
+velero backup create bkp-kube-system-2024-11-28 --include-namespaces=kube-system
+Backup request "bkp-kube-system-2024-11-28" submitted successfully.
+Run `velero backup describe bkp-kube-system-2024-11-28` or `velero backup logs bkp-kube-system-2024-11-28` for more details.
+
+# check it
+velero backup get bkp-kube-system-2024-11-28
+NAME                         STATUS            ERRORS   WARNINGS   CREATED                         EXPIRES   STORAGE LOCATION   SELECTOR
+bkp-kube-system-2024-11-28   PartiallyFailed   2        0          2024-11-28 06:21:14 +0000 UTC   29d       default            <none>
+
+# we have 2 errors, check details
+velero backup describe bkp-kube-system-2024-11-28
+Name:         bkp-kube-system-2024-11-28
+Namespace:    velero
+Labels:       velero.io/storage-location=default
+Annotations:  velero.io/resource-timeout=10m0s
+              velero.io/source-cluster-k8s-gitversion=v1.26.11+rke2r1
+              velero.io/source-cluster-k8s-major-version=1
+              velero.io/source-cluster-k8s-minor-version=26
+
+Phase:  PartiallyFailed (run `velero backup logs bkp-kube-system-2024-11-28` for more information)
+
+
+Errors:
+  Velero:    message: /no matches for kind "VolumeSnapshot" in version "snapshot.storage.k8s.io/v1"
+             message: /failed to get restmapping: no matches for kind "VolumeSnapshotContentList" in group "snapshot.storage.k8s.io"
+.
+.
+.
+
+## 14- resolve above Error on VolumeSnapshot kind
+# check exist volumesnapshotclass, volumesnapshot and volumesnapshotcontents on kubernetes cluster
+kubectl get volumesnapshotclass
+error: the server doesn''t have a resource type "volumesnapshotclass"
+
+kubectl get volumesnapshot
+error: the server doesn''t have a resource type "volumesnapshot"
+
+kubectl get volumesnapshotcontents
+error: the server doesn''t have a resource type "volumesnapshotcontents"
+
+# download CRDs from https://github.com/kubernetes-csi/external-snapshotter/tree/master/client/config/crd
+# latest version v8.1.0
+# create them
+cd v8.1.0/
+kubectl create -f snapshot.storage.k8s.io_volumesnapshotclasses.yaml -f snapshot.storage.k8s.io_volumesnapshots.yaml -f snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+customresourcedefinition.apiextensions.k8s.io/volumesnapshotclasses.snapshot.storage.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/volumesnapshots.snapshot.storage.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/volumesnapshotcontents.snapshot.storage.k8s.io created
+
+# check it
+kubectl get volumesnapshotclass
+No resources found
+
+kubectl get volumesnapshot
+No resources found in default namespace.
+
+kubectl get volumesnapshotcontents
+No resources found
+
+## 15- Delete and Take backup again
+# delete old backup
+velero backup delete bkp-kube-system-2024-11-28
+Are you sure you want to continue (Y/N)? y
+Request to delete backup "bkp-kube-system-2024-11-28" submitted successfully.
+The backup will be fully deleted after all associated data (disk snapshots, backup files, restores) are removed.
+
+# take backup again
+velero backup create bkp-kube-system-2024-11-28 --include-namespaces=kube-system
+Backup request "bkp-kube-system-2024-11-28" submitted successfully.
+Run `velero backup describe bkp-kube-system-2024-11-28` or `velero backup logs bkp-kube-system-2024-11-28` for more details.
+
+# check it
+velero backup get bkp-kube-system-2024-11-28
+NAME                         STATUS      ERRORS   WARNINGS   CREATED                         EXPIRES   STORAGE LOCATION   SELECTOR
+bkp-kube-system-2024-11-28   Completed   0        0          2024-11-28 06:56:46 +0000 UTC   29d       default            <none>
+
+# check details
+velero backup describe bkp-kube-system-2024-11-28
+Name:         bkp-kube-system-2024-11-28
+Namespace:    velero
+Labels:       velero.io/storage-location=default
+Annotations:  velero.io/resource-timeout=10m0s
+              velero.io/source-cluster-k8s-gitversion=v1.26.11+rke2r1
+              velero.io/source-cluster-k8s-major-version=1
+              velero.io/source-cluster-k8s-minor-version=26
+
+Phase:  Completed
+
+
+Namespaces:
+  Included:  kube-system
+  Excluded:  <none>
+
+Resources:
+  Included:        *
+  Excluded:        <none>
+  Cluster-scoped:  auto
+
+Label selector:  <none>
+
+Or label selector:  <none>
+
+Storage Location:  default
+
+Velero-Native Snapshot PVs:  auto
+Snapshot Move Data:          false
+Data Mover:                  velero
+
+TTL:  720h0m0s
+
+CSISnapshotTimeout:    10m0s
+ItemOperationTimeout:  4h0m0s
+
+Hooks:  <none>
+
+Backup Format Version:  1.1.0
+
+Started:    2024-11-28 06:56:46 +0000 UTC
+Completed:  2024-11-28 06:56:48 +0000 UTC
+
+Expiration:  2024-12-28 06:56:46 +0000 UTC
+
+Total items to be backed up:  274
+Items backed up:              274
+
+Backup Volumes:
+  Velero-Native Snapshots: <none included>
+
+  CSI Snapshots: <none included>
+
+  Pod Volume Backups: <none included>
+
+HooksAttempted:  0
+HooksFailed:     0
+
+## 16- enable velero feature on client side
+# for take backup or snapshot from pvc need enable CSI feature
+velero client config set features=EnableCSI
+
+# check it
+velero client config get
+features: EnableCSI
+
+cat $HOME/.config/velero/config.json
+{"features":"EnableCSI"}
+
+# if you need, disable all feature on client side
+velero client config set features=
+
+## 17- Backup from namespace with pvc on rook-ceph
+# take backup 
+velero backup create bkp-default-all-2024-11-28 --include-namespaces=default
+Backup request "bkp-default-all-2024-11-28" submitted successfully.
+Run `velero backup describe bkp-default-all-2024-11-28` or `velero backup logs bkp-default-all-2024-11-28` for more details.
+
+# check it
+velero backup get bkp-default-all-2024-11-28
+NAME                     STATUS            ERRORS   WARNINGS   CREATED                         EXPIRES   STORAGE LOCATION   SELECTOR
+bkp-default-all-2024-11-28   PartiallyFailed   26       39         2024-11-28 07:01:34 +0000 UTC   29d       default            <none>
+
+# check detail
+velero backup describe bkp-default-all-2024-11-28
+Name:         bkp-default-all-2024-11-28
+Namespace:    velero
+Labels:       velero.io/storage-location=default
+Annotations:  velero.io/resource-timeout=10m0s
+              velero.io/source-cluster-k8s-gitversion=v1.26.11+rke2r1
+              velero.io/source-cluster-k8s-major-version=1
+              velero.io/source-cluster-k8s-minor-version=26
+
+Phase:  PartiallyFailed (run `velero backup logs bkp-default-all-2024-11-28` for more information)
+
+
+Warnings:
+  Velero:     <none>
+  Cluster:   resource: /persistentvolumes name: /peer-bki-peer01-ledger message: /No volume ID returned by volume snapshotter for persistent volume
+             resource: /persistentvolumes name: /peer-bki-peer01-couchdb message: /No volume ID returned by volume snapshotter for persistent volume
+.
+.
+.
+Errors:
+        Velero:
+            name: /backend-tokenization-cbi-admin-cbi-6854c88cff-tdjh2 message: /Error backing up item error: /error executing custom action (groupResource=persistentvolumeclaims, namespace=pentest, name=backend-tokenization-cbi-admin-cbi): rpc error: code = Unknown desc = failed to get VolumeSnapshotClass for StorageClass rook-cephfs: error getting VolumeSnapshotClass: failed to get VolumeSnapshotClass for provisioner rook-ceph.cephfs.csi.ceph.com, ensure that the desired VolumeSnapshot class has the velero.io/csi-volumesnapshot-class label
+            name: /common message: /Error backing up item error: /error executing custom action (groupResource=persistentvolumeclaims, namespace=pentest, name=common): rpc error: code = Unknown desc = failed to get VolumeSnapshotClass for StorageClass rook-cephfs: error getting VolumeSnapshotClass: failed to get VolumeSnapshotClass for provisioner rook-ceph.cephfs.csi.ceph.com, ensure that the desired VolumeSnapshot class has the velero.io/csi-volumesnapshot-class label
+
+## 18- resolve above Errors and create VolumeSnapshotClass
+kubectl create -f 04-VolumeSnapshotClass_cephfs.yaml
+volumesnapshotclass.snapshot.storage.k8s.io/csi-cephfs-snapshotclass created
+
+# if you need VolumeSnapshotClass on rbd run below command
+kubectl create -f 05-VolumeSnapshotClass_rbd.yaml 
+volumesnapshotclass.snapshot.storage.k8s.io/csi-rbd-snapshotclass created
+
+# check it
+kubectl get volumesnapshotclasses.snapshot.storage.k8s.io
+NAME                       DRIVER                          DELETIONPOLICY   AGE
+csi-cephfs-snapshotclass   rook-ceph.cephfs.csi.ceph.com   Delete           43s
+csi-rbd-snapshotclass      rook-ceph.rbd.csi.ceph.com      Delete           43s
+
+## 19- delete old backup and take again
+velero backup delete bkp-default-all-2024-11-28
+Are you sure you want to continue (Y/N)? y
+Request to delete backup "bkp-default-all-2024-11-28" submitted successfully.
+The backup will be fully deleted after all associated data (disk snapshots, backup files, restores) are removed.
+
+# take backup again with enable csi feature 
+velero backup create bkp-default-all-2024-11-28 --include-namespaces=default --wait --features=EnableCSI --default-volumes-to-fs-backup=true
+Backup request "bkp-default-all-2024-11-28" submitted successfully.
+Waiting for backup to complete. You may safely press ctrl-c to stop waiting - your backup will continue in the background.
+.......
+Backup completed with status: Completed. You may check for more information using the commands `velero backup describe bkp-default-all-2024-11-28` and `velero backup logs bkp-default-all-2024-11-28`.
+
+# check it
+velero backup get bkp-default-all-2024-11-28
+NAME                         STATUS      ERRORS   WARNINGS   CREATED                         EXPIRES   STORAGE LOCATION   SELECTOR
+bkp-default-all-2024-11-28   Completed   0        0          2024-11-28 10:08:15 +0000 UTC   29d       default            <none>
+
+# check details
+velero backup describe bkp-default-all-2024-11-28
+Name:         bkp-default-all-2024-11-28
+Namespace:    velero
+Labels:       velero.io/storage-location=default
+Annotations:  velero.io/resource-timeout=10m0s
+              velero.io/source-cluster-k8s-gitversion=v1.26.11+rke2r1
+              velero.io/source-cluster-k8s-major-version=1
+              velero.io/source-cluster-k8s-minor-version=26
+
+Phase:  Completed
+
+
+Namespaces:
+  Included:  default
+  Excluded:  <none>
+
+Resources:
+  Included:        *
+  Excluded:        <none>
+  Cluster-scoped:  auto
+
+Label selector:  <none>
+
+Or label selector:  <none>
+
+Storage Location:  default
+
+Velero-Native Snapshot PVs:  auto
+Snapshot Move Data:          false
+Data Mover:                  velero
+
+TTL:  720h0m0s
+
+CSISnapshotTimeout:    10m0s
+ItemOperationTimeout:  4h0m0s
+
+Hooks:  <none>
+
+Backup Format Version:  1.1.0
+
+Started:    2024-11-28 10:08:15 +0000 UTC
+Completed:  2024-11-28 10:08:22 +0000 UTC
+
+Expiration:  2024-12-28 10:08:15 +0000 UTC
+
+Total items to be backed up:  138
+Items backed up:              138
+
+Backup Volumes:
+  Velero-Native Snapshots: <none included>
+
+  CSI Snapshots: <none included>
+
+  Pod Volume Backups - kopia (specify --details for more information):
+    Completed:  2
+
+HooksAttempted:  0
+HooksFailed:     0
+
+# check Podvolumebackups
+kubectl get  Podvolumebackups  -n velero
+NAME                                 STATUS      CREATED   NAMESPACE   POD                                   VOLUME    UPLOADER TYPE   STORAGE LOCATION   AGE
+bkp-default-all-2024-11-28-fztbh     Completed   2m10s     default     combine-deployment-688999ff6b-gw57j   volv-fs   kopia           default            2m10s
+bkp-default-all-2024-11-28-m5qjf     Completed   2m4s      default     combine-deployment-688999ff6b-gw57j   volv-lh   kopia           default            2m10s
+
+## 20- restore from backup
+# delete deployment on default namespace
+kubectl delete -f  deplotmment.yaml --grace-period=0 --force
+persistentvolumeclaim "cephfs-pvc" deleted
+persistentvolumeclaim "rbd-pvc" deleted
+deployment.apps "combine-deployment" deleted
+
+# restore from backup
+velero restore create res-default-all-2024-11-28 --from-backup=bkp-default-all-2024-11-28 --include-namespaces=default
+Restore request "res-default-all-2024-11-28" submitted successfully.
+Run `velero restore describe res-default-all-2024-11-28` or `velero restore logs res-default-all-2024-11-28` for more details.
+
+# check it
+velero restore get res-default-all-2024-11-28
+NAME                         BACKUP                       STATUS      STARTED                         COMPLETED                       ERRORS   WARNINGS   CREATED                         SELECTOR
+res-default-all-2024-11-28   bkp-default-all-2024-11-28   Completed   2024-11-28 10:12:33 +0000 UTC   2024-11-28 10:12:52 +0000 UTC   0        1          2024-11-28 10:12:33 +0000 UTC   <none>
+
+# details
+velero restore describe res-default-all-2024-11-28
+Name:         res-default-all-2024-11-28
+Namespace:    velero
+Labels:       <none>
+Annotations:  <none>
+
+Phase:                       Completed
+Total items to be restored:  27
+Items restored:              27
+
+Started:    2024-11-28 10:12:33 +0000 UTC
+Completed:  2024-11-28 10:12:52 +0000 UTC
+
+Warnings:
+  Velero:     <none>
+  Cluster:    <none>
+  Namespaces:
+    default:  could not restore, Service "kubernetes" already exists. Warning: the in-cluster version is different than the backed-up version
+
+Backup:  bkp-default-all-2024-11-28
+
+Namespaces:
+  Included:  default
+  Excluded:  <none>
+
+Resources:
+  Included:        *
+  Excluded:        nodes, events, events.events.k8s.io, backups.velero.io, restores.velero.io, resticrepositories.velero.io, csinodes.storage.k8s.io, volumeattachments.storage.k8s.io, backuprepositories.velero.io
+  Cluster-scoped:  auto
+
+Namespace mappings:  <none>
+
+Label selector:  <none>
+
+Or label selector:  <none>
+
+Restore PVs:  auto
+
+kopia Restores (specify --details for more information):
+  Completed:  2
+
+CSI Snapshot Restores: <none included>
+
+Existing Resource Policy:   <none>
+ItemOperationTimeout:       4h0m0s
+
+Preserve Service NodePorts:  auto
+
+Uploader config:
+
+
+HooksAttempted:   0
+HooksFailed:      0
+
+# check deployment,pods,pvc
+kubectl get deployments.apps,pods,pvc -n default
+NAME                                 READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/combine-deployment   1/1     1            1           95s
+
+NAME                                      READY   STATUS    RESTARTS   AGE
+pod/combine-deployment-748d7ddbf8-jjpdc   1/1     Running   0          96s
+
+NAME                               STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      AGE
+persistentvolumeclaim/cephfs-pvc   Bound    pvc-64b00fa1-fd31-4726-9b16-b1a429aa54db   12Gi       RWX            rook-cephfs       96s
+persistentvolumeclaim/rbd-pvc      Bound    pvc-188cc868-5dd2-44ad-ad6b-09a07b6b7003   12Gi       RWO            rook-ceph-block   96s
+
+
+## 21- uninstall velero
+kubectl delete namespace/velero clusterrolebinding/velero ; kubectl delete crds -l component=velero  
+# or
+velero uninstall  --force

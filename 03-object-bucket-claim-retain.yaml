@@ -1,0 +1,8 @@
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: ceph-retain-bucket
+spec:
+  bucketName: ceph-retain-bucket-velero-bkp
+  # generateBucketName: ceph-bkt
+  storageClassName: rook-ceph-retain-bucket
